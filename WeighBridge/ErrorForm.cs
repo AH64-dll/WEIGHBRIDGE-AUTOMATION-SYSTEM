@@ -21,8 +21,17 @@ namespace Weighbridge
         public static extern bool ReleaseCapture();
         private void ErrorForm_MouseDown(object sender, MouseEventArgs e)
         {
-            ReleaseCapture();
-            SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+            try
+            {
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                {
+                    ReleaseCapture();
+                    SendMessage(this.Handle, WM_NCLBUTTONDOWN, HT_CAPTION, 0);
+                }
+            }
+            catch
+            {
+            }
         }
         #endregion
         public ErrorForm()
@@ -37,12 +46,12 @@ namespace Weighbridge
         public ErrorForm(String errorType, String errorMessage)
         {
             InitializeComponent();
-            if (errorType == "Uyarı")
+            errorTitle.Text = errorType;
+            errorLabel.Text = errorMessage;
+            if (errorType == "Uyarı" || errorType == "تنبيه" || errorType == "نجاح" || errorType == "معلومات")
             {
                 this.BackColor = ColorTranslator.FromHtml("#90caf9");
                 errorIcon.BackColor = ColorTranslator.FromHtml("#90caf9");
-                errorLabel.Text = errorMessage;
-                errorTitle.Text = errorType;
                 errorIcon.Image = Properties.Resources.check;
             }
         }

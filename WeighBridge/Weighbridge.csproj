@@ -60,6 +60,7 @@
     <Reference Include="System.Drawing" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
+    <Reference Include="Mono.Data.Sqlite" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ErrorForm.cs">
@@ -69,6 +70,10 @@
       <DependentUpon>ErrorForm.cs</DependentUpon>
     </Compile>
     <Compile Include="HelperFunction.cs" />
+    <Compile Include="DatabaseService.cs" />
+    <Compile Include="ScaleProtocolEngine.cs" />
+    <Compile Include="HistoryForm.cs" />
+    <Compile Include="CustomerAccountsForm.cs" />
     <Compile Include="Properties\Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DesignTime>True</DesignTime>

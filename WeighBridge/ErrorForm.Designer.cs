@@ -42,7 +42,7 @@
             // errorLabel
             // 
             this.errorLabel.AutoSize = true;
-            this.errorLabel.Font = new System.Drawing.Font("Bahnschrift", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
+            this.errorLabel.Font = new System.Drawing.Font("Noto Sans Arabic", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
             this.errorLabel.Location = new System.Drawing.Point(20, 13);
             this.errorLabel.MaximumSize = new System.Drawing.Size(415, 0);
             this.errorLabel.Name = "errorLabel";
@@ -61,26 +61,26 @@
             // 
             // okButton
             // 
-            this.okButton.Font = new System.Drawing.Font("Bahnschrift", 11.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
+            this.okButton.Font = new System.Drawing.Font("Noto Sans Arabic", 11.25F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
             this.okButton.Location = new System.Drawing.Point(320, 3);
             this.okButton.Name = "okButton";
             this.okButton.Size = new System.Drawing.Size(115, 30);
             this.okButton.TabIndex = 20;
-            this.okButton.Text = "OK";
+            this.okButton.Text = "موافق";
             this.okButton.UseVisualStyleBackColor = true;
             this.okButton.Click += new System.EventHandler(this.okButton_Click);
             // 
             // errorTitle
             // 
             this.errorTitle.AutoSize = true;
-            this.errorTitle.Font = new System.Drawing.Font("Bahnschrift", 12F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
+            this.errorTitle.Font = new System.Drawing.Font("Noto Sans Arabic", 12F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(162)));
             this.errorTitle.ForeColor = System.Drawing.Color.White;
             this.errorTitle.Location = new System.Drawing.Point(29, 6);
             this.errorTitle.MaximumSize = new System.Drawing.Size(350, 0);
             this.errorTitle.Name = "errorTitle";
             this.errorTitle.Size = new System.Drawing.Size(43, 19);
             this.errorTitle.TabIndex = 21;
-            this.errorTitle.Text = "Hata";
+            this.errorTitle.Text = "خطأ";
             // 
             // buttonPanel
             // 

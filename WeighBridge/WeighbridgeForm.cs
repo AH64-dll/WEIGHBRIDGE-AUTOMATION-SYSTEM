@@ -1,736 +1,580 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Configuration;
+using System;
 using System.Data;
 using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Windows.Forms;
-using System.Data.OleDb;
-using System.IO.Ports;
-using System.Threading;
 using System.Drawing.Printing;
 using System.Globalization;
-using System.Text.RegularExpressions;
+using System.Windows.Forms;
 
 namespace Weighbridge
 {
     public partial class WeighBridgeForm : Form
     {
-        #region Form and Application Default Settings
-        // Create DateTime variable for arrival and departure times
-        DateTime CurrentDate;
-        // Create Serial Port variable for handling serial port data
-        SerialPort _serialPort;
-        // Control which one (gross or tare) will measured, default is gross
-        bool captured = true;
-        // Weight integer value, this will keep weight value that came from weightbridge
-        int weight = 0;
-        // Keep the data that is from weightbridge in this variable
-        string weightString = String.Empty;
-        // Weight data string with kg unit
-        string weightStringKG = String.Empty;
-        // Search the received weightbridge buffer and crop the weight values
-        string bufferString = String.Empty;
+        private readonly DatabaseService _db = DatabaseService.Instance;
+        private readonly ScaleProtocolEngine _scale = ScaleProtocolEngine.Instance;
+        private readonly HelperFunction _helper = new HelperFunction();
 
-        // gross, tare and net weight integer values, keep this integer values for calculations
-        int grossWeight = 0, tareWeight = 0, netWeight = 0;
+        private WeighingRecord _currentRecord;
+        private int _liveWeight = 0;
+        private bool _isStable = true;
 
-        // Create config command to use open and get config file values
-        Configuration config = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
-        // Create Database Connection and Command
-        OleDbConnection connection;
-        OleDbCommand command;
-        HelperFunction helperFunc = new HelperFunction();
         public WeighBridgeForm()
         {
             InitializeComponent();
         }
-        private void Form1_Load(object sender, EventArgs e)
+
+        private void WeighBridgeForm_Load(object sender, EventArgs e)
         {
-            // First active control when the form load
-            this.ActiveControl = captureWeightButton;
+            ApplyBranding();
+            LoadGovernorates();
+            LoadCustomerAutocomplete();
+            RefreshPendingQueue();
+            LoadLatestOrNewRecord();
 
-            // Open COM port and read data from weighbridge
-            SerialPortProcess();
+            // Wire up scale protocol engine
+            _scale.OnWeightChanged += Scale_OnWeightChanged;
+            _scale.OnStatusChanged += Scale_OnStatusChanged;
+            _scale.OnError += Scale_OnError;
+            _scale.Start();
 
-            // Initialize the page that will be print
-            PrintPage();
+            // Print setup
+            SetupPrintDocument();
+        }
 
-            // Set Database Connection, Get Database Directory from Config file
-            connection = new OleDbConnection("Provider = Microsoft.ACE.OLEDB.12.0; Data Source = " + config.AppSettings.Settings["DatabaseDirectory"].Value.ToString());
+        private void WeighBridgeForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            _scale.Stop();
+        }
 
-            GetLastTicketNo();
+        #region Scale Integration
+        private void Scale_OnWeightChanged(int weight, bool isStable, bool isNegative)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => Scale_OnWeightChanged(weight, isStable, isNegative)));
+                return;
+            }
+
+            _liveWeight = weight;
+            _isStable = isStable;
+
+            if (isNegative)
+            {
+                panelLiveWeight.BackColor = Color.FromArgb(255, 120, 0);
+                lblLiveWeightValue.Text = $"{_liveWeight}";
+                lblScaleStatus.Text = $"تحذير: قراءة سالبة ({_liveWeight} كجم) - يلزم تصفير الميزان";
+                lblScaleStatus.ForeColor = Color.DarkOrange;
+            }
+            else
+            {
+                panelLiveWeight.BackColor = Color.FromArgb(0, 210, 0);
+                lblLiveWeightValue.Text = _liveWeight.ToString();
+            }
+
+            ledStability.BackColor = _isStable ? Color.FromArgb(0, 220, 0) : Color.Red;
+        }
+        private void Scale_OnStatusChanged(string status)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => Scale_OnStatusChanged(status)));
+                return;
+            }
+
+            lblScaleStatus.Text = status;
+            lblScaleStatus.ForeColor = Color.DarkGreen;
+        }
+
+        private void Scale_OnError(string error)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => Scale_OnError(error)));
+                return;
+            }
+
+            lblScaleStatus.Text = error;
+            lblScaleStatus.ForeColor = Color.Red;
         }
         #endregion
 
-        #region Serial Port Properties
-        public void SerialPortProcess()
+        #region Branding and Setup
+        private void ApplyBranding()
         {
-            Control.CheckForIllegalCrossThreadCalls = false;
-            // all of the options for a serial device
-            // can be sent through the constructor of the SerialPort class
-            // PortName = "COM1", Baud Rate = 19200, Parity = None, 
-            // Data Bits = 8, Stop Bits = One, Handshake = None
+            lblTicketTitle.Text = _db.GetSetting("CompanyName", "ميزان بسكول ابو السعد ۱۲۰ طن");
+            lblTicketSubtitle.Text = _db.GetSetting("CompanySubtitle", "العنوان فوه كفر الشيخ ٠١٠٩٢١٨٠١٤٦ ايمن / ٠١٠٦٢٥٥١١٨٩ محمد");
+            lblTicketFooter.Text = _db.GetSetting("FooterText", "هذا البرنامج صنع خصيصا لشركة اولاد الغلباني الحديثة بدمنهور");
+            this.Text = $"تسجيل الاوزان من ميزان الكتروني - {lblTicketTitle.Text}";
+            
+            lblRxEvent.Text = $"Fire Rx Event Every: {_db.GetSetting("RxEventInterval", "12")}";
+            lblInputLen.Text = $"InputLen: {_db.GetSetting("InputLen", "0")}";
+        }
 
-            // Create an instance of SerialPort
-            _serialPort = new SerialPort();
+        private void LoadGovernorates()
+        {
+            string defaultGov = _db.GetSetting("DefaultGovernorate", "كفر الشيخ");
+            if (txtGovernorate.Items.Contains(defaultGov))
+            {
+                txtGovernorate.SelectedItem = defaultGov;
+            }
+        }
 
-            try
+        private void LoadCustomerAutocomplete()
+        {
+            txtCustomerName.Items.Clear();
+            var names = _db.GetCustomerNames();
+            foreach (var n in names)
             {
-                // Get the configurations for SerialPort from config file
-                _serialPort.PortName = config.AppSettings.Settings["PortName"].Value.ToString();
-                _serialPort.BaudRate = Convert.ToInt32(config.AppSettings.Settings["BaudRate"].Value);
-                _serialPort.Parity = (Parity)Enum.Parse(typeof(Parity), config.AppSettings.Settings["Parity"].Value.ToString(), true);
-                _serialPort.DataBits = Convert.ToInt32(config.AppSettings.Settings["DataBits"].Value);
-                _serialPort.StopBits = (StopBits)Enum.Parse(typeof(StopBits), config.AppSettings.Settings["StopBits"].Value.ToString(), true);
-                _serialPort.Handshake = (Handshake)Enum.Parse(typeof(Handshake), config.AppSettings.Settings["Handshake"].Value.ToString(), true);
-                _serialPort.ReadTimeout = 500;
-                _serialPort.WriteTimeout = 500;
+                txtCustomerName.Items.Add(n);
             }
-            catch (System.ArgumentOutOfRangeException e)
-            {
-                helperFunc.CreateMessageBox(e.ParamName + " değeri geçerli aralığın dışındaydı. Lütfen ayarlardan " + e.ParamName + " değerini kontrol edin.");
-            }
-
-            _serialPort.DataReceived += new SerialDataReceivedEventHandler(SerialPortDataReceived);
-
-            try
-            {
-                _serialPort.Open();
-            }
-            catch (System.UnauthorizedAccessException)
-            {
-                helperFunc.CreateMessageBox("Seri port açılırken bir hata meydana geldi. Başka bir uygulama seri portu kullanıyor olabilir.");
-                _serialPort.Close();
-                _serialPort.Dispose();
-                _serialPort.Open();
-            }
-            catch (System.IO.IOException)
-            {
-                helperFunc.CreateMessageBox("COM1 Bağlantı noktası bulunamadı. " +
-                                "Program açılacaktır fakat kantar verisi görüntülenmeyecektir. " +
-                                "Lütfen kabloyu ve bağlantı noktası adını kontrol edin.");
-            }
-
         }
         #endregion
 
-        #region Serial Port Data Receive Function
-        void SerialPortDataReceived(object sender, SerialDataReceivedEventArgs e)
+        #region Record Management
+        private void LoadLatestOrNewRecord()
         {
-
-            // https://code.msdn.microsoft.com/windowsdesktop/SerialPort-brief-Example-ac0d5004
-            // Initialize a buffer which has a size of Port buffer [4096] to hold the received data 
-            byte[] buffer = new byte[_serialPort.ReadBufferSize];
-
-            // Fill the buffer with received data 
-            int bytesRead = _serialPort.Read(buffer, 0, buffer.Length);
-
-            // Assume the data we are received is ASCII data. 
-            weightString = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-
-            // Store the value of previous weight value for comparison with new one
-            // If the weight value is equal to previous weight value, then stay idle
-            string tempString = String.Empty;
-
-            // Search the buffer for finding weight numbers byte by byte 
-            for (int i = 0; i < buffer.Length - 2; i++)
+            var latest = _db.GetLatestRecord();
+            if (latest != null)
             {
-                // If the character is "+" (ASCII 43), then initialize the reading of weight
-                if (buffer[i] == 43)
+                DisplayRecordOnTicket(latest);
+            }
+            else
+            {
+                PrepareNewRecord();
+            }
+        }
+
+        private void PrepareNewRecord()
+        {
+            _currentRecord = new WeighingRecord
+            {
+                TicketNo = _db.GetNextTicketNo(),
+                Governorate = txtGovernorate.Text,
+                Status = "Pending"
+            };
+
+            ClearInputFields();
+            lblSerial.Text = $"مسلسل: {_currentRecord.TicketNo}-";
+            lblValCustomer.Text = "-";
+            lblValPlate.Text = "-";
+            lblValDriver.Text = "-";
+            lblValTrailer.Text = "-";
+            lblValCargo.Text = "-";
+            lblValGovernorate.Text = txtGovernorate.Text;
+            lblValFirstWeight.Text = "0";
+            lblValFirstTime.Text = "-";
+            lblValFirstDate.Text = "-";
+            lblValSecondWeight.Text = "0";
+            lblValSecondTime.Text = "-";
+            lblValSecondDate.Text = "-";
+            lblValNetWeight.Text = "0 كجم";
+
+            btnFirstWeight.Enabled = true;
+            btnSecondWeight.Enabled = false;
+            btnSecondWeight.BackColor = Color.FromArgb(235, 240, 240);
+        }
+
+        private void DisplayRecordOnTicket(WeighingRecord r)
+        {
+            if (r == null) return;
+            _currentRecord = r;
+
+            lblSerial.Text = $"مسلسل: {r.TicketNo}-";
+            lblValCustomer.Text = string.IsNullOrEmpty(r.CustomerName) ? "-" : r.CustomerName;
+            lblValPlate.Text = string.IsNullOrEmpty(r.CarPlate) ? "-" : r.CarPlate;
+            lblValDriver.Text = string.IsNullOrEmpty(r.DriverName) ? "-" : r.DriverName;
+            lblValTrailer.Text = string.IsNullOrEmpty(r.TrailerNo) ? "-" : r.TrailerNo;
+            lblValCargo.Text = string.IsNullOrEmpty(r.CargoType) ? "-" : r.CargoType;
+            lblValGovernorate.Text = string.IsNullOrEmpty(r.Governorate) ? "-" : r.Governorate;
+
+            lblValFirstWeight.Text = r.FirstWeight.ToString();
+            lblValFirstTime.Text = string.IsNullOrEmpty(r.FirstTime) ? "-" : r.FirstTime;
+            lblValFirstDate.Text = string.IsNullOrEmpty(r.FirstDate) ? "-" : r.FirstDate;
+
+            lblValSecondWeight.Text = r.SecondWeight.ToString();
+            lblValSecondTime.Text = string.IsNullOrEmpty(r.SecondTime) ? "-" : r.SecondTime;
+            lblValSecondDate.Text = string.IsNullOrEmpty(r.SecondDate) ? "-" : r.SecondDate;
+
+            lblValNetWeight.Text = $"{r.NetWeight} كجم";
+            // Populate form inputs
+            txtCustomerName.Text = r.CustomerName;
+            txtCarPlate.Text = r.CarPlate;
+            txtCargoType.Text = r.CargoType;
+            txtGovernorate.Text = r.Governorate;
+            txtDriverName.Text = r.DriverName;
+            txtTrailerNo.Text = r.TrailerNo;
+
+            if (r.Status == "Pending")
+            {
+                btnFirstWeight.Enabled = false;
+                btnSecondWeight.Enabled = true;
+                btnSecondWeight.BackColor = Color.FromArgb(100, 210, 100);
+            }
+            else
+            {
+                btnFirstWeight.Enabled = true;
+                btnSecondWeight.Enabled = false;
+                btnSecondWeight.BackColor = Color.FromArgb(235, 240, 240);
+            }
+        }
+
+        private void ClearInputFields()
+        {
+            txtCustomerName.Text = "";
+            txtCarPlate.Text = "";
+            txtCargoType.Text = "";
+            txtDriverName.Text = "";
+            txtTrailerNo.Text = "";
+        }
+        #endregion
+
+        #region Actions (First Weight, Second Weight, Queue)
+        private void btnFirstWeight_Click(object sender, EventArgs e)
+        {
+            string plate = txtCarPlate.Text.Trim();
+            if (string.IsNullOrEmpty(plate))
+            {
+                _helper.CreateMessageBox("تنبيه", "يرجى إدخال رقم لوحة السيارة أولاً.");
+                txtCarPlate.Focus();
+                return;
+            }
+
+            int weight = _liveWeight;
+            if (weight < 0)
+            {
+                _helper.CreateMessageBox("تحذير", $"قراءة الميزان سالبة ({weight} كجم).\nلا يمكن تسجيل وزنة دخول بقيمة سالبة!\nيرجى التحقق من خلو منصة الميزان وتصفير المؤشر.");
+                return;
+            }
+
+            if (weight == 0)
+            {
+                var res = MessageBox.Show("تنبيه: وزن الميزان الحالي يساوي صفراً (0 كجم).\nهل أنت متأكد من تسجيل وزنة بدون حمولة على الميزان؟", "تأكيد الوزن الصفري", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (res != DialogResult.Yes) return;
+            }
+
+            DateTime now = DateTime.Now;
+            string dateStr = now.ToString("yyyy/MM/dd");
+            string timeStr = now.ToString("hh:mm:ss tt", CultureInfo.CreateSpecificCulture("ar-EG"));
+
+            var record = new WeighingRecord
+            {
+                TicketNo = _db.GetNextTicketNo(),
+                CustomerName = txtCustomerName.Text.Trim(),
+                CarPlate = plate,
+                TrailerNo = txtTrailerNo.Text.Trim(),
+                DriverName = txtDriverName.Text.Trim(),
+                CargoType = txtCargoType.Text.Trim(),
+                Governorate = txtGovernorate.Text.Trim(),
+                FirstWeight = weight,
+                FirstDate = dateStr,
+                FirstTime = timeStr,
+                Status = "Pending"
+            };
+
+            int ticketNo = _db.SaveFirstWeight(record);
+            record.TicketNo = ticketNo;
+
+            DisplayRecordOnTicket(record);
+            RefreshPendingQueue();
+            LoadCustomerAutocomplete();
+
+            _helper.CreateMessageBox("نجاح", $"تم تسجيل الوزن الأول بنجاح للسيارة ({plate}) برقم تذكرة ({ticketNo}).");
+        }
+        private void btnSecondWeight_Click(object sender, EventArgs e)
+        {
+            if (_currentRecord == null || _currentRecord.Status != "Pending")
+            {
+                _helper.CreateMessageBox("تنبيه", "يرجى اختيار سيارة معلقة من القائمة لتسجيل الوزن الثاني.");
+                return;
+            }
+
+            int secondWeight = _liveWeight;
+            if (secondWeight < 0)
+            {
+                _helper.CreateMessageBox("تحذير", $"قراءة الميزان سالبة ({secondWeight} كجم).\nلا يمكن تسجيل وزنة خروج بقيمة سالبة!\nيرجى إعادة تصفير الميزان.");
+                return;
+            }
+
+            if (secondWeight == 0)
+            {
+                var res = MessageBox.Show("تنبيه: وزن الميزان الحالي يساوي صفراً (0 كجم).\nهل أنت متأكد من تصفية الوزن بقيمة خروج صفرية؟", "تأكيد الوزن الصفري", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (res != DialogResult.Yes) return;
+            }
+
+            int netWeight = Math.Abs(_currentRecord.FirstWeight - secondWeight);
+
+            DateTime now = DateTime.Now;
+            string dateStr = now.ToString("yyyy/MM/dd");
+            string timeStr = now.ToString("hh:mm:ss tt", CultureInfo.CreateSpecificCulture("ar-EG"));
+
+            bool ok = _db.SaveSecondWeight(_currentRecord.TicketNo, secondWeight, dateStr, timeStr, netWeight, _currentRecord.Fee, _currentRecord.Notes);
+            if (ok)
+            {
+                _currentRecord.SecondWeight = secondWeight;
+                _currentRecord.SecondDate = dateStr;
+                _currentRecord.SecondTime = timeStr;
+                _currentRecord.NetWeight = netWeight;
+                _currentRecord.Status = "Completed";
+
+                DisplayRecordOnTicket(_currentRecord);
+                RefreshPendingQueue();
+
+                _helper.CreateMessageBox("نجاح", $"تمت تصفية وزن السيارة ({_currentRecord.CarPlate}) بنجاح!\nالوزن الصافي: {netWeight} كجم.");
+
+                // Prompt print preview
+                printPreviewDialog.ShowDialog();
+            }
+            else
+            {
+                _helper.CreateMessageBox("خطأ", "حدث خطأ أثناء حفظ الوزن الثاني في قاعدة البيانات.");
+            }
+        }
+
+        private void RefreshPendingQueue()
+        {
+            string dateFilter = dtpPendingDate.Value.ToString("yyyy/MM/dd");
+            var dt = _db.GetPendingWeighings(dateFilter);
+
+            gridPending.Items.Clear();
+            foreach (DataRow row in dt.Rows)
+            {
+                var item = new ListViewItem(row["CarPlate"].ToString());
+                item.SubItems.Add(row["FirstWeight"].ToString());
+                item.SubItems.Add(row["FirstTime"].ToString());
+                item.Tag = Convert.ToInt32(row["TicketNo"]);
+                gridPending.Items.Add(item);
+            }
+        }
+
+        private void gridPending_DoubleClick(object sender, EventArgs e)
+        {
+            if (gridPending.SelectedItems.Count > 0)
+            {
+                int ticketNo = (int)gridPending.SelectedItems[0].Tag;
+                var record = _db.GetWeighingByTicket(ticketNo);
+                if (record != null)
                 {
-                    i++;
-                    for (i = i; buffer[i] != 43 && i < buffer.Length - 1; i++)
-                    {
-                        // Search digits and dot character in buffer, digits in ASCII table exist in [48, 57] interval, dot is 46 in ASCII
-                        if (buffer[i] > 47 && buffer[i] < 58 || buffer[i] == 46)
-                        {
-                            bufferString += char.ConvertFromUtf32(buffer[i]);
-                        }
-                    }
-                    // Display shows 0.0005 when the weight is 0, FIX it manually
-                    if (bufferString == "0.0005")
-                        bufferString = "0.000";
-
-                    // If the bufferString has a new value, then change it with new one
-                    if (bufferString != tempString)
-                        tempString = bufferString;
-
-                    // Irrelevant data may come from the serial port
-                    // To check that it is a weight value, we must control if the bufferString.Length is bigger than 4
-                    // Because minimum weight value that come from serial port is 0.000 and it's length is 5
-                    if (bufferString.Length > 4)
-                    {
-                        // Show weight value in the display (Example: display = 15.000)
-                        sevenSegmentArray1.Value = bufferString;
-                        // Add "kg" to weight value (Example: weightStringKG = 15.000 kg)
-                        weightStringKG = AddKG(bufferString);
-                        // Delete the "." character (Example: bufferString = "15000")
-                        bufferString = bufferString.Replace(".", string.Empty);
-                        // Get integer weight value (Example: weight = 15000)
-                        weight = Convert.ToInt32(bufferString);
-
-                        // Fix the dot problem (for example: if weight is 250kg, display shows = 0.250 kg, but must be 250 kg
-                        if (weight < 1000)
-                        {
-                            weightStringKG = weightStringKG.TrimStart('0');
-                            weightStringKG = weightStringKG.Replace(".", string.Empty);
-                            //weightStringKG = bufferString + " kg";
-                        }
-                        // Clear bufferString for new value
-                        bufferString = String.Empty;
-                    }
+                    DisplayRecordOnTicket(record);
                 }
             }
         }
-        #endregion
 
-        #region Database Connection (OpenConnection, InsertDatabase, GetLastTicketNo)
-        /// <summary>
-        /// Open a connection to a database for fetching or inserting data
-        /// </summary>
-        public void OpenConnection()
+        private void dtpPendingDate_ValueChanged(object sender, EventArgs e)
         {
-            command = connection.CreateCommand();
-            try
+            RefreshPendingQueue();
+        }
+
+        private void btnSearchPlate_Click(object sender, EventArgs e)
+        {
+            string query = txtSearchPlate.Text.Trim();
+            if (string.IsNullOrEmpty(query)) return;
+
+            var pending = _db.GetPendingWeighingByPlate(query);
+            if (pending != null)
             {
-                connection.Open();
+                DisplayRecordOnTicket(pending);
+                return;
             }
-            catch (OleDbException e)
+
+            var all = _db.GetAllWeighings(query);
+            if (all.Rows.Count > 0)
             {
-                helperFunc.CreateMessageBox("Veritabanına bağlanırken sorun yaşandı. Bağlantı açık kalmış olabilir veya veritabanı yolu doğru olmayabilir.");
-            }
-        }
-
-        /// <summary>
-        /// Open the database connection and insert the text box values to the database
-        /// </summary>
-        public void InsertDatabase()
-        {
-            OpenConnection();
-
-            // Insert the Data and close the connection
-            command.CommandText = "Insert into Fatura(Plaka, " +
-                "Brut, " +
-                "Dara, " +
-                "Net," +
-                "GelisZamani," +
-                "CikisZamani," +
-                "Firma)Values('" + carTextBox.Text + "','"
-                                    + grossWeightTextBox.Text + "','"
-                                    + tareWeightTextBox.Text + "','"
-                                    + netWeightTextBox.Text + "','"
-                                    + arrivalTimeTextBox.Text + "','"
-                                    + departureTimeTextBox.Text + "','"
-                                    + companyTextBox.Text + "')";
-            command.Connection = connection;
-            command.ExecuteNonQuery();
-            helperFunc.CreateMessageBox("Veriler Kaydedildi.");
-            connection.Close();
-        }
-        /// <summary>
-        /// Get last ticket no and add +1 for ticket no of new record
-        /// Set the new ticket no with getting last record's id from database
-        /// </summary>
-        public void GetLastTicketNo()
-        {
-            OpenConnection();
-            command.CommandText = "SELECT max(ID) from Fatura";
-            command.Connection = connection;
-            Int32 max = 0;
-            try
-            {
-                max = (Int32)command.ExecuteScalar();
-                command.ExecuteNonQuery();
-            }
-            catch (Exception)
-            {
-                helperFunc.CreateMessageBox("Son veritabanı kaydının ID'sinin alınması için açık ve kullanılabilen bir Connection gereklidir. Bağlantının geçerli durumu: kapalı.");
-            }
-            connection.Close();
-
-            // Set the new ticket no
-            ticketNoText.Text = (max + 1).ToString();
-
-        }
-        #endregion
-
-        #region Enter and Leave Events for Textboxes and Buttons, Clear TextBoxes
-
-        // THIS SECTION EFFECTS ALL TEXT BOXES AND BUTTONS!
-
-        // Enter text box event for changing background color
-        private void text_Enter(object sender, EventArgs e)
-        {
-            ((TextBox)sender).BackColor = Color.LightGreen;
-        }
-
-        // Leave text box event for changing background color to default
-        private void text_Leave(object sender, EventArgs e)
-        {
-            ((TextBox)sender).BackColor = Color.White;
-        }
-
-        //Enter button event for changing button color when the mouse is over button
-        public void button_Enter(object sender, EventArgs e)
-        {
-            ((Button)sender).BackColor = Color.LemonChiffon;
-        }
-
-        // Leave button event for changing button color to default when the mouse cursor is leaved from button
-        public void button_Leave(object sender, EventArgs e)
-        {
-            ((Button)sender).BackColor = Color.LightBlue;
-        }
-
-        public void ClearTextBoxes(Control.ControlCollection ctrlCollection)
-        {
-            foreach (Control ctrl in ctrlCollection)
-            {
-                if (ctrl is TextBoxBase)
+                int ticketNo = Convert.ToInt32(all.Rows[0]["رقم التذكرة"]);
+                var rec = _db.GetWeighingByTicket(ticketNo);
+                if (rec != null)
                 {
-                    ctrl.Text = String.Empty;
-                }
-                else
-                {
-                    ClearTextBoxes(ctrl.Controls);
+                    DisplayRecordOnTicket(rec);
+                    return;
                 }
             }
+
+            _helper.CreateMessageBox("تنبيه", $"لم يتم العثور على سجلات للسيارة ({query}).");
         }
-        #endregion
 
-        #region Specify Page Size
-        private void PrintPage()
+        private void btnPrevRecord_Click(object sender, EventArgs e)
         {
-            PrinterSettings printerSettings = new PrinterSettings();
-            // Page Size is 15.2 x 17 cm
-            // Specify custom paper size
-            PaperSize paperSize = new PaperSize("Test", 600, 700);
-            // Apply new custom paper size
-            paperSize.RawKind = (int)PaperKind.Custom;
-
-            // Set new paper size with margins
-            printDocument.DefaultPageSettings.PaperSize = paperSize;
-            printDocument.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
-
-            // Set default paper size for printer with margins
-            printDocument.PrinterSettings.DefaultPageSettings.PaperSize = paperSize;
-            printDocument.PrinterSettings.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
-        }
-        #endregion
-
-        #region Print and Page Functions
-        // Open Print Dialog and select Printer
-        private void printButton_Click(object sender, EventArgs e)
-        {
-
-            DialogResult pdr = printDialog.ShowDialog();
-            if (pdr == DialogResult.OK)
+            if (_currentRecord == null) return;
+            var prev = _db.GetPreviousRecord(_currentRecord.TicketNo);
+            if (prev != null)
             {
-                printDocument.Print();
-
-                // After printing process, save the datas to the database,
-                // Clear textboxes for new entries, 
-                // Set the checkbox,
-                // Then get the last id from database for new entry
-
-                InsertDatabase();
-                ClearTextBoxes(this.Controls);
-
-                // check gross weight checkbox and auto checkbox
-                // clear tare weight checkbox and manual checkbox
-                grossWeightRadioButton.Checked = true;
-                autoRadioButton.Checked = true;
-                GetLastTicketNo();
-
+                DisplayRecordOnTicket(prev);
             }
         }
-        // Preview Print Page
-        private void previewButton_Click(object sender, EventArgs e)
+
+        private void btnNextRecord_Click(object sender, EventArgs e)
+        {
+            if (_currentRecord == null) return;
+            var next = _db.GetNextRecord(_currentRecord.TicketNo);
+            if (next != null)
+            {
+                DisplayRecordOnTicket(next);
+            }
+        }
+
+        private void txtInputs_Changed(object sender, EventArgs e)
+        {
+            lblValCustomer.Text = string.IsNullOrEmpty(txtCustomerName.Text) ? "-" : txtCustomerName.Text;
+            lblValPlate.Text = string.IsNullOrEmpty(txtCarPlate.Text) ? "-" : txtCarPlate.Text;
+            lblValCargo.Text = string.IsNullOrEmpty(txtCargoType.Text) ? "-" : txtCargoType.Text;
+            lblValGovernorate.Text = string.IsNullOrEmpty(txtGovernorate.Text) ? "-" : txtGovernorate.Text;
+            lblValDriver.Text = string.IsNullOrEmpty(txtDriverName.Text) ? "-" : txtDriverName.Text;
+            lblValTrailer.Text = string.IsNullOrEmpty(txtTrailerNo.Text) ? "-" : txtTrailerNo.Text;
+        }
+
+        private void btnDailySettings_Click(object sender, EventArgs e)
+        {
+            menuDatabase_Click(sender, e);
+        }
+        #endregion
+
+        #region Menu Navigation
+        private void menuUsers_Click(object sender, EventArgs e)
+        {
+            _helper.CreateMessageBox("معلومات", "إدارة المستخدمين: حساب المسؤول نشط.");
+        }
+
+        private void menuWeights_Click(object sender, EventArgs e)
+        {
+            var historyForm = new HistoryForm();
+            historyForm.ShowDialog();
+        }
+
+        private void menuCustomers_Click(object sender, EventArgs e)
+        {
+            var custForm = new CustomerAccountsForm();
+            custForm.ShowDialog();
+        }
+
+        private void menuDatabase_Click(object sender, EventArgs e)
+        {
+            var settingsForm = new SettingsForm();
+            if (settingsForm.ShowDialog() == DialogResult.OK)
+            {
+                ApplyBranding();
+                LoadGovernorates();
+                _scale.Start();
+            }
+        }
+
+        private void menuAbout_Click(object sender, EventArgs e)
+        {
+            _helper.CreateMessageBox("عن البرنامج", "نظام تسجيل الأوزان من ميزان إلكتروني شاحنات (بسكول)\nالإصدار: 2.0 (عربي كامل)\nيدعم العمل الميداني وقواعد بيانات SQLite والأجهزة التسلسلية.");
+        }
+
+        private void menuPrint_Click(object sender, EventArgs e)
         {
             printPreviewDialog.ShowDialog();
         }
 
-        // Open Page Settings Dialog
-        private void pageSettingsButton_Click(object sender, EventArgs e)
-        {
-            pageSetupDialog.ShowDialog();
-        }
-
-        // Set Print Page
-        private void printDocument_PrintPage(object sender, System.Drawing.Printing.PrintPageEventArgs e)
-        {
-            // To draw a line and set font, create font, brush and pen objects
-            Font myFont = new Font("Calibri", 12);
-            SolidBrush sbrush = new SolidBrush(Color.Black);
-            Pen myPen = new Pen(Color.Black);
-
-            // Control the coordinates with x and y variables
-            int x = 30;
-            int y = 30;
-
-            //For Logo
-            //e.Graphics.DrawImage(Properties.Resources.logo, 100, 20);
-
-            // Add title of company and set the line to print page  
-            e.Graphics.DrawString("ÇOBANOĞLU GERİ DÖNÜŞÜM TESİSAT", myFont, sbrush, x + 130, y);
-            y += 30;
-            e.Graphics.DrawString("TEL: 0534 353 12 97", myFont, sbrush, x + 185, y);
-            y += 30;
-            e.Graphics.DrawLine(myPen, x, y, 550, y);
-            y += 30;
-
-            myFont = new Font("Calibri", 12, FontStyle.Bold);
-            e.Graphics.DrawString(ticketNoLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(ticketNoText.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString(carLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(carTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString(companyLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(companyTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString(arrivalTimeLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(arrivalTimeTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString(departureTimeLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(departureTimeTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString("Tartım2", myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(grossWeightTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString("Tartım1", myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(tareWeightTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-            e.Graphics.DrawString(netWeightLabel.Text, myFont, sbrush, x, y);
-            e.Graphics.DrawString(":", myFont, sbrush, x + 130, y);
-            e.Graphics.DrawString(netWeightTextBox.Text, myFont, sbrush, x + 150, y);
-            y += 30;
-
-            StringFormat myStringFormat = new StringFormat();
-            myStringFormat.Alignment = StringAlignment.Far;
-        }
-        #endregion
-
-        #region Helper Functions (AddKG, RemoveKG, AddPoint, CalculateNetWeight)
-        /// <summary>
-        /// Add " kg" to weight value in the textbox
-        /// </summary>
-        /// <param name="weightValue">Weight value that will be represent with kg</param>
-        /// <returns></returns>
-        public String AddKG(String weightValue)
-        {
-            if (weightValue == String.Empty)
-            {
-                weightValue = "0";
-            }
-            weightValue = weightValue + " kg";
-            return weightValue;
-        }
-
-        /// <summary>
-        /// Removes only " kg" from weight value in the textbox
-        /// </summary>
-        /// <param name="weightValue">Weight value that will be get rid of " kg" postfix</param>
-        /// <returns></returns>
-        public String RemoveKG(String weightValue)
-        {
-            weightValue = Regex.Replace(weightValue, "[A-Za-z. ]", "");
-            if (weightValue == "0")
-            {
-                weightValue = String.Empty;
-            }
-            return weightValue;
-        }
-
-        /// <summary>
-        /// Add "." to weight value if weightValue >= 1000
-        /// </summary>
-        /// <param name="targetTextBox">Specify the target textBox.</param>
-        /// <param name="weightValue">Specify the weight value.</param>
-        public void AddPoint(TextBox targetTextBox, int weightValue)
-        {
-            CultureInfo elGR = CultureInfo.CreateSpecificCulture("el-GR");
-            if (weightValue >= 1000 || weightValue <= -1000)
-            {
-                // Add dot and display it in netWeightTextBox
-                targetTextBox.Text = weightValue.ToString("0,0", elGR);
-            }
-        }
-
-        /// <summary>
-        /// Calculates net weight.
-        /// </summary>
-        /// <param name="gross">gross weight</param>
-        /// <param name="tare">tare weight</param>
-        public void CalculateNetWeight(int gross, int tare)
-        {
-            netWeight = gross - tare;
-
-            if (netWeight < 1000)
-            {
-                netWeightTextBox.Text = AddKG(netWeight.ToString());
-            }
-            else
-            {
-                AddPoint(netWeightTextBox, netWeight);
-                netWeightTextBox.Text = AddKG(netWeightTextBox.Text);
-            }
-
-            if (netWeight < 0)
-            {
-                AddPoint(netWeightTextBox, netWeight);
-                helperFunc.CreateMessageBox("Net Tartım değeri 0'dan küçük olarak ölçüldü. Lütfen tartım değerlerinizi kontrol ediniz.");
-            }
-        }
-        #endregion
-
-        #region Capture Weight Button
-        // Capture Weight Button Click Event
-        // Auto fill the Date Button for Gross Weight
-        // Auto fill the Date Button for Tare Weight
-        private void captureWeightButton_Click(object sender, EventArgs e)
-        {
-            // Create variable for Date and Time
-            CurrentDate = DateTime.Now;
-
-            // Control if tareWeightRadioButton is checked
-            if (tareWeightRadioButton.Checked)
-            {
-                captured = false;
-            }
-            else
-            {
-                captured = true;
-            }
-
-            // Write arrival time and gross weight and check tare weight check box
-            if (grossWeightRadioButton.Checked & captured)
-            {
-                // Get the current date and time and write to the arrivalTimeTextBox
-                arrivalTimeTextBox.Text = CurrentDate.ToString();
-                // Write the measured gross weight to grossWeightTextBox with KG
-                grossWeightTextBox.Text = weightStringKG;
-                // Because of the grossweight is just measured, tareWeight must be 0
-                tareWeightTextBox.Text = 0 + " kg";
-                // tareWeight integer value also must be zero
-                tareWeight = 0;
-                // grossWeight integer value is measured weight value
-                grossWeight = weight;
-                // Because of the grossweight is measured, check the tareWeightRadioButton
-                tareWeightRadioButton.Checked = true;
-            }
-
-            // Write departure time and tare weight and check gross weight checkbox
-            if (tareWeightRadioButton.Checked & !captured)
-            {
-                // Get the current date and time and write to the departureTimeTextBox
-                departureTimeTextBox.Text = CurrentDate.ToString();
-                // Write the measured tare weight to tareWeightTextBox with KG
-                tareWeightTextBox.Text = weightStringKG;
-                // tareWeight integer value is measured tareWeight value
-                tareWeight = weight;
-                // Because of the tareweight is measured, check the grossWeightRadioButton for another measure operation
-                grossWeightRadioButton.Checked = true;
-            }
-
-            CalculateNetWeight(grossWeight, tareWeight);
-        }
-        #endregion
-
-        #region Auto and Manual Radio Button's Behaviour
-        private void autoRadioButton_CheckedChanged(object sender, EventArgs e)
-        {
-            if (autoRadioButton.Checked)
-            {
-                grossWeightTextBox.Enabled = false;
-                tareWeightTextBox.Enabled = false;
-                netWeightTextBox.Enabled = false;
-            }
-        }
-        private void manualRadioButton_CheckedChanged(object sender, EventArgs e)
-        {
-            if (manualRadioButton.Checked)
-            {
-                grossWeightTextBox.Enabled = true;
-                tareWeightTextBox.Enabled = true;
-                netWeightTextBox.Enabled = true;
-            }
-
-            // Add event handler for weight textboxes to add and remove kg, details are in AddKG, RemoveKG and event handlers
-            grossWeightTextBox.Enter += GrossWeightTextBox_Enter;
-            grossWeightTextBox.Leave += GrossWeightTextBox_Leave;
-            tareWeightTextBox.Enter += TareWeightTextBox_Enter;
-            tareWeightTextBox.Leave += TareWeightTextBox_Leave;
-
-            // Add event handler for weight textboxes to calculate net weight dynamically
-            grossWeightTextBox.TextChanged += TareGrossWeightTextBox_TextChanged;
-            tareWeightTextBox.TextChanged += TareGrossWeightTextBox_TextChanged;
-        }
-        #endregion
-
-        #region Event Handlers for Entering and Leaving Weight TextBoxes
-        private void grossWeightTextBox_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (e.KeyChar == (char)(Keys.Enter))
-            {
-                this.ActiveControl = tareWeightTextBox;
-            }
-        }
-        private void tareWeightTextBox_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (e.KeyChar == (char)(Keys.Enter))
-            {
-                this.ActiveControl = netWeightTextBox;
-            }
-        }
-
-        // THE EVENT HANDLERS IN THIS SECTION ARE NOT PREDEFINED.
-        // THESE ARE WILL BE ADDED AFTER manualRadioButton IS ACTIVE.
-        private void GrossWeightTextBox_Enter(object sender, EventArgs e)
-        {
-            grossWeightTextBox.Text = RemoveKG(grossWeightTextBox.Text);
-        }
-        private void GrossWeightTextBox_Leave(object sender, EventArgs e)
-        {
-            if (grossWeightTextBox.Text != String.Empty)
-            {
-                AddPoint(grossWeightTextBox, Convert.ToInt32(grossWeightTextBox.Text));
-            }
-            grossWeightTextBox.Text = AddKG(grossWeightTextBox.Text);
-        }
-        private void TareWeightTextBox_Enter(object sender, EventArgs e)
-        {
-            tareWeightTextBox.Text = RemoveKG(tareWeightTextBox.Text);
-        }
-        private void TareWeightTextBox_Leave(object sender, EventArgs e)
-        {
-            if (tareWeightTextBox.Text != String.Empty)
-            {
-                AddPoint(tareWeightTextBox, Convert.ToInt32(tareWeightTextBox.Text));
-            }
-            tareWeightTextBox.Text = AddKG(tareWeightTextBox.Text);
-        }
-        private void TareGrossWeightTextBox_TextChanged(object sender, EventArgs e)
-        {
-            // Keep integer value of gross and tare Weight TextBox in this variable
-            int gross, tare;
-            // RemoveKG function may return String.Empty before convert the text value of tareWeight, so we must check with this temporary string variable
-            String weightGross, weightTare;
-
-            // Get the grossWeightText to weightGrosstemporary variable
-            weightGross = grossWeightTextBox.Text;
-            // Remove the KG, this function also removes any character so the rest of it's value will be Empty or a number
-            weightGross = RemoveKG(weightGross);
-
-            // If gross clicked and it's text value is 0, then it's text value will be converted to String.Empty because of GrossWeightTextBox_Enter Event Handler
-            // If text value is not zero, then it is a number
-            // Check if grossWeight Text is String.Empty or a number
-            if (weightGross == String.Empty)
-            {
-                gross = 0;
-            }
-            else
-            {
-                gross = Convert.ToInt32(weightGross);
-            }
-
-            // Get the tareWeightText to weightTare temporary variable
-            weightTare = tareWeightTextBox.Text;
-            // Remove the KG, this function also removes any character so the rest of it's value will be Empty or a number
-            weightTare = RemoveKG(weightTare);
-
-            // Control if the tareWeightTextBox is Empty or a number
-            if (weightTare == String.Empty)
-            {
-                tare = 0;
-            }
-            else
-            {
-                tare = Convert.ToInt32(weightTare);
-            }
-
-            CalculateNetWeight(gross, tare);
-        }
-        #endregion
-
-        #region ListView Operations
-        // When ListView Item is double clicked, fetch the data from listview to textbox
-        public void listview_DoubleClick(object sender, EventArgs e)
-        {
-            // 
-            for (int i = 0; i < queueListView.Items.Count; i++)
-            {
-                // If the list view item is selected
-                if (queueListView.Items[i].Selected)
-                {
-                    // Get the data of zeroth index to the carTextBox
-                    carTextBox.Text = queueListView.Items[i].SubItems[0].Text;
-                    // Get the data of first index to the arrivatTimeTextBox
-                    arrivalTimeTextBox.Text = queueListView.Items[i].SubItems[1].Text;
-                    // Get the data of second index to the grossWeightTextBox
-                    grossWeightTextBox.Text = queueListView.Items[i].SubItems[2].Text;
-
-                    // When the data fetching is over, remove this row
-                    queueListView.SelectedItems[0].Remove();
-
-                    // The data in the list has a value of gross weight, so when the data is fetched, tareWeightRadioButton must be checked
-                    tareWeightRadioButton.Checked = true;
-                    // And state of captured must be false
-                    captured = false;
-                }
-            }
-        }
-        #endregion
-
-        #region Save Button
-        private void saveButton_Click(object sender, EventArgs e)
-        {
-            // Pair column data with textbox data
-            ListViewItem queue = new ListViewItem(carTextBox.Text); // 1st Column
-            queue.SubItems.Add(arrivalTimeTextBox.Text);            // 2nd Column
-            queue.SubItems.Add(grossWeightTextBox.Text);            // 3th Column
-
-            // Add textbox data to listview
-            queueListView.Items.Add(queue);
-        }
-
-        #endregion
-
-        #region Settings Button
-        private void settingsButton_Click(object sender, EventArgs e)
-        {
-            SettingsForm settingsDialog = new SettingsForm();
-            settingsDialog.ShowDialog();
-        }
-        #endregion
-
-        #region Clear Button
-        private void clearButton_Click(object sender, EventArgs e)
-        {
-            ClearTextBoxes(this.Controls);
-
-            // TicketNo must not clear, fix this issue with calling GetLastTicketNo function
-            GetLastTicketNo();
-        }
-        #endregion
-
-        #region Exit from Application
-        // Exit Application
-        private void exitButton_Click(object sender, EventArgs e)
+        private void menuExit_Click(object sender, EventArgs e)
         {
             this.Close();
         }
         #endregion
 
+        #region Printing
+        private void SetupPrintDocument()
+        {
+            PaperSize paperSize = new PaperSize("CustomScaleTicket", 650, 450);
+            paperSize.RawKind = (int)PaperKind.Custom;
+
+            printDocument.DefaultPageSettings.PaperSize = paperSize;
+            printDocument.DefaultPageSettings.Margins = new Margins(10, 10, 10, 10);
+            printDocument.PrinterSettings.DefaultPageSettings.PaperSize = paperSize;
+        }
+
+        private void printDocument_PrintPage(object sender, PrintPageEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Font fontHeader = new Font("Noto Sans Arabic", 16, FontStyle.Bold);
+            Font fontSub = new Font("Noto Sans Arabic", 10, FontStyle.Bold);
+            Font fontRegular = new Font("Noto Sans Arabic", 10, FontStyle.Regular);
+            Font fontBold = new Font("Noto Sans Arabic", 10, FontStyle.Bold);
+            Font fontLargeBold = new Font("Noto Sans Arabic", 12, FontStyle.Bold);
+
+            SolidBrush brushBlack = new SolidBrush(Color.Black);
+            SolidBrush brushNavy = new SolidBrush(Color.Navy);
+            SolidBrush brushRed = new SolidBrush(Color.DarkRed);
+            SolidBrush brushGreen = new SolidBrush(Color.DarkGreen);
+            Pen penBlack = new Pen(Color.Black, 1.5f);
+
+            int startX = 25;
+            int startY = 20;
+            int width = 590;
+
+            // Border Box
+            g.DrawRectangle(penBlack, startX, startY, width, 380);
+
+            // Title & Header
+            string title = lblTicketTitle.Text;
+            string subtitle = lblTicketSubtitle.Text;
+            g.DrawString(title, fontHeader, brushBlack, new RectangleF(startX, startY + 5, width, 35), new StringFormat { Alignment = StringAlignment.Center });
+            g.DrawString(subtitle, fontSub, brushBlack, new RectangleF(startX, startY + 40, width, 25), new StringFormat { Alignment = StringAlignment.Center });
+
+            int ticketNo = _currentRecord != null ? _currentRecord.TicketNo : 1;
+            g.DrawString($"مسلسل: {ticketNo}-", fontBold, brushBlack, startX + 15, startY + 15);
+
+            g.DrawLine(penBlack, startX, startY + 70, startX + width, startY + 70);
+
+            // Info Table
+            int rowY = startY + 80;
+            int rightColX = startX + width - 15;
+
+            var sfRight = new StringFormat { Alignment = StringAlignment.Far };
+            var sfLeft = new StringFormat { Alignment = StringAlignment.Near };
+
+            // Row 1
+            g.DrawString("اسم العميل:", fontBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString(_currentRecord?.CustomerName ?? "-", fontBold, brushNavy, rightColX - 90, rowY, sfRight);
+
+            g.DrawString("اسم السائق:", fontBold, brushBlack, startX + 260, rowY, sfRight);
+            g.DrawString(_currentRecord?.DriverName ?? "-", fontRegular, brushBlack, startX + 170, rowY, sfRight);
+
+            // Row 2
+            rowY += 28;
+            g.DrawString("رقم السيارة:", fontBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString(_currentRecord?.CarPlate ?? "-", fontLargeBold, brushRed, rightColX - 90, rowY, sfRight);
+
+            g.DrawString("رقم المقطورة:", fontBold, brushBlack, startX + 260, rowY, sfRight);
+            g.DrawString(_currentRecord?.TrailerNo ?? "-", fontRegular, brushBlack, startX + 170, rowY, sfRight);
+
+            // Row 3
+            rowY += 28;
+            g.DrawString("نوع الشحنة:", fontBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString(_currentRecord?.CargoType ?? "-", fontRegular, brushBlack, rightColX - 90, rowY, sfRight);
+
+            g.DrawString("المحافظة:", fontBold, brushBlack, startX + 260, rowY, sfRight);
+            g.DrawString(_currentRecord?.Governorate ?? "كفر الشيخ", fontRegular, brushBlack, startX + 170, rowY, sfRight);
+
+            // Separator line before weights
+            rowY += 35;
+            g.DrawLine(penBlack, startX, rowY, startX + width, rowY);
+
+            // Weights Table
+            rowY += 10;
+            g.DrawString("الوزن الأول:", fontBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString($"{_currentRecord?.FirstWeight ?? 0}", fontLargeBold, brushGreen, rightColX - 85, rowY, sfRight);
+            g.DrawString("الوقت:", fontBold, brushBlack, rightColX - 180, rowY, sfRight);
+            g.DrawString(_currentRecord?.FirstTime ?? "-", fontRegular, brushBlack, rightColX - 230, rowY, sfRight);
+            g.DrawString("التاريخ:", fontBold, brushBlack, rightColX - 350, rowY, sfRight);
+            g.DrawString(_currentRecord?.FirstDate ?? "-", fontRegular, brushBlack, rightColX - 405, rowY, sfRight);
+
+            rowY += 30;
+            g.DrawString("الوزن الثاني:", fontBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString($"{_currentRecord?.SecondWeight ?? 0}", fontLargeBold, brushNavy, rightColX - 85, rowY, sfRight);
+            g.DrawString("الوقت:", fontBold, brushBlack, rightColX - 180, rowY, sfRight);
+            g.DrawString(_currentRecord?.SecondTime ?? "-", fontRegular, brushBlack, rightColX - 230, rowY, sfRight);
+            g.DrawString("التاريخ:", fontBold, brushBlack, rightColX - 350, rowY, sfRight);
+            g.DrawString(_currentRecord?.SecondDate ?? "-", fontRegular, brushBlack, rightColX - 405, rowY, sfRight);
+
+            rowY += 30;
+            g.DrawString("صافي الوزن:", fontLargeBold, brushBlack, rightColX, rowY, sfRight);
+            g.DrawString($"{_currentRecord?.NetWeight ?? 0} كجم", new Font("Noto Sans Arabic", 14, FontStyle.Bold), brushRed, rightColX - 110, rowY - 2, sfRight);
+
+            // Footer line
+            rowY += 40;
+            g.DrawLine(penBlack, startX, rowY, startX + width, rowY);
+            g.DrawString(lblTicketFooter.Text, new Font("Noto Sans Arabic", 8, FontStyle.Regular), new SolidBrush(Color.FromArgb(80, 80, 80)), new RectangleF(startX, rowY + 5, width, 20), new StringFormat { Alignment = StringAlignment.Center });
+        }
+        #endregion
     }
 }

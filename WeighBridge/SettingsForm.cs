@@ -1,98 +1,89 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
+using System;
 using System.Windows.Forms;
-using System.Configuration;
-using System.Collections.Specialized;
-using System.Xml;
 
 namespace Weighbridge
 {
     public partial class SettingsForm : Form
     {
-        HelperFunction helperFunc = new HelperFunction();
+        private readonly DatabaseService _db = DatabaseService.Instance;
+        private readonly HelperFunction _helper = new HelperFunction();
+
         public SettingsForm()
         {
             InitializeComponent();
-
-            ReadAppSettings();
+            LoadSettings();
         }
 
-        string fileDirectory;
-        string fileName;
-
-        Configuration config = ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None);
-
-        // Read Application Settings from config file
-        public void ReadAppSettings()
+        private void LoadSettings()
         {
-            // Get configs values using keys 
-            portNameComboBox.Text = config.AppSettings.Settings["PortName"].Value.ToString();
-            baudRateComboBox.Text = config.AppSettings.Settings["BaudRate"].Value.ToString();
-            parityComboBox.Text = config.AppSettings.Settings["Parity"].Value.ToString();
-            dataBitsComboBox.Text = config.AppSettings.Settings["DataBits"].Value.ToString();
-            stopBitsComboBox.Text = config.AppSettings.Settings["StopBits"].Value.ToString();
-            handshakeComboBox.Text = config.AppSettings.Settings["Handshake"].Value.ToString();
-            databaseDirectoryTextBox.Text = config.AppSettings.Settings["DatabaseDirectory"].Value;
+            cmbPortName.Text = _db.GetSetting("PortName", "COM1");
+            cmbBaudRate.Text = _db.GetSetting("BaudRate", "9600");
+            cmbParity.Text = _db.GetSetting("Parity", "None");
+            cmbDataBits.Text = _db.GetSetting("DataBits", "8");
+            cmbStopBits.Text = _db.GetSetting("StopBits", "One");
+            cmbHandshake.Text = _db.GetSetting("Handshake", "None");
+
+            string proto = _db.GetSetting("ScaleProtocol", "ContinuousASCII");
+            int idx = cmbProtocol.FindString(proto);
+            cmbProtocol.SelectedIndex = idx >= 0 ? idx : 0;
+
+            chkSimulator.Checked = _db.GetSetting("SimulatorEnabled", "False").Equals("True", StringComparison.OrdinalIgnoreCase);
+
+            txtCompanyName.Text = _db.GetSetting("CompanyName", "ميزان بسكول ابو السعد ۱۲۰ طن");
+            txtSubtitle.Text = _db.GetSetting("CompanySubtitle", "العنوان فوه كفر الشيخ ٠١٠٩٢١٨٠١٤٦ ايمن / ٠١٠٦٢٥٥١١٨٩ محمد");
+            txtFooterText.Text = _db.GetSetting("FooterText", "هذا البرنامج صنع خصيصا لشركة اولاد الغلباني الحديثة بدمنهور");
+            txtDefaultGov.Text = _db.GetSetting("DefaultGovernorate", "كفر الشيخ");
         }
 
-        // Get Default App Settings
-        public void DefaultAppSettings()
+        private void btnSave_Click(object sender, EventArgs e)
         {
-            portNameComboBox.Text = "COM1";
-            baudRateComboBox.Text = "9600";
-            parityComboBox.Text = "None";
-            dataBitsComboBox.Text = "8";
-            stopBitsComboBox.Text = "One";
-            handshakeComboBox.Text = "None";
+            _db.SaveSetting("PortName", cmbPortName.Text);
+            _db.SaveSetting("BaudRate", cmbBaudRate.Text);
+            _db.SaveSetting("Parity", cmbParity.Text);
+            _db.SaveSetting("DataBits", cmbDataBits.Text);
+            _db.SaveSetting("StopBits", cmbStopBits.Text);
+            _db.SaveSetting("Handshake", cmbHandshake.Text);
+
+            string protoSelected = cmbProtocol.SelectedItem?.ToString() ?? "ContinuousASCII";
+            string protoKey = "ContinuousASCII";
+            if (protoSelected.Contains("Toledo")) protoKey = "ToledoContinuous";
+            else if (protoSelected.Contains("CAS")) protoKey = "CAS_Continuous";
+            else if (protoSelected.Contains("Avery")) protoKey = "AveryWeighTronix";
+
+            _db.SaveSetting("ScaleProtocol", protoKey);
+            _db.SaveSetting("SimulatorEnabled", chkSimulator.Checked ? "True" : "False");
+
+            _db.SaveSetting("CompanyName", txtCompanyName.Text.Trim());
+            _db.SaveSetting("CompanySubtitle", txtSubtitle.Text.Trim());
+            _db.SaveSetting("FooterText", txtFooterText.Text.Trim());
+            _db.SaveSetting("DefaultGovernorate", txtDefaultGov.Text.Trim());
+
+            _helper.CreateMessageBox("نجاح", "تم حفظ جميع الإعدادات بنجاح!");
+            this.DialogResult = DialogResult.OK;
+            this.Close();
         }
 
-        // Update Settings
-        public void UpdateAppSettings()
+        private void btnDefault_Click(object sender, EventArgs e)
         {
-            config.AppSettings.Settings["PortName"].Value = portNameComboBox.Text;
-            config.AppSettings.Settings["BaudRate"].Value = baudRateComboBox.Text;
-            config.AppSettings.Settings["Parity"].Value = parityComboBox.Text;
-            config.AppSettings.Settings["DataBits"].Value = dataBitsComboBox.Text;
-            config.AppSettings.Settings["StopBits"].Value = stopBitsComboBox.Text;
-            config.AppSettings.Settings["Handshake"].Value = handshakeComboBox.Text;
-            config.AppSettings.Settings["DatabaseDirectory"].Value = databaseDirectoryTextBox.Text;
-            config.Save(ConfigurationSaveMode.Modified);
+            cmbPortName.Text = "COM1";
+            cmbBaudRate.Text = "9600";
+            cmbParity.Text = "None";
+            cmbDataBits.Text = "8";
+            cmbStopBits.Text = "One";
+            cmbHandshake.Text = "None";
+            cmbProtocol.SelectedIndex = 0;
+            chkSimulator.Checked = false;
 
-            ConfigurationManager.RefreshSection("appSettings");
-            helperFunc.CreateMessageBox("Uyarı", "Ayarlar Kaydedildi! Ayarların uygulanması için lütfen programı yeniden başlatın.");
-            //MessageBox.Show("Ayarlar Kaydedildi! Ayarların uygulanması için lütfen programı yeniden başlatın.");
+            txtCompanyName.Text = "ميزان بسكول ابو السعد ۱۲۰ طن";
+            txtSubtitle.Text = "العنوان فوه كفر الشيخ ٠١٠٩٢١٨٠١٤٦ ايمن / ٠١٠٦٢٥٥١١٨٩ محمد";
+            txtFooterText.Text = "هذا البرنامج صنع خصيصا لشركة اولاد الغلباني الحديثة بدمنهور";
+            txtDefaultGov.Text = "كفر الشيخ";
         }
 
-        #region Select Database Directory
-        private void databaseDirectoryButton_Click(object sender, EventArgs e)
+        private void btnCancel_Click(object sender, EventArgs e)
         {
-            openFileDialog.Title = "Access Dosyası Seçiniz...";
-            openFileDialog.Filter = "Access Dosyası |*.accdb*";
-            openFileDialog.RestoreDirectory = true;
-
-            if (openFileDialog.ShowDialog() == DialogResult.OK)
-            {
-                fileDirectory = openFileDialog.FileName;
-                fileName = openFileDialog.SafeFileName;
-            }
-
-            databaseDirectoryTextBox.Text = fileDirectory;
-        }
-        #endregion
-
-        private void saveSettingsButton_Click(object sender, EventArgs e)
-        {
-            UpdateAppSettings();
-        }
-
-        private void defaultButton_Click(object sender, EventArgs e)
-        {
-            DefaultAppSettings();
+            this.DialogResult = DialogResult.Cancel;
+            this.Close();
         }
     }
 }
